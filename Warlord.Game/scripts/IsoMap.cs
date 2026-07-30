@@ -1,4 +1,5 @@
 using Godot;
+using Warlord.Core.Generation;
 using Warlord.Core.Persistence;
 using Warlord.Core.State;
 
@@ -17,6 +18,10 @@ public partial class IsoMap : Node2D
     private const int TileWidth = 128;
     private const int TileHeight = 64;
 
+    // Fixed seed for now so the generated map is reproducible; a "new campaign"
+    // flow would randomize this.
+    private const int MapSeed = 12345;
+
     private Camera2D _camera = null!;
     private Label _info = null!;
     private CampaignMapState _map = null!;
@@ -28,6 +33,19 @@ public partial class IsoMap : Node2D
         _camera = GetNode<Camera2D>("Camera2D");
         _info = GetNode<Label>("HUD/Info");
         _map = LoadOrSeedMap();
+        FrameCamera();
+    }
+
+    /// <summary>Center the camera on the map and zoom so the whole thing fits.</summary>
+    private void FrameCamera()
+    {
+        _camera.Position = CellToScreen((_map.Columns - 1) / 2, (_map.Rows - 1) / 2);
+
+        float mapWidth = (_map.Columns + _map.Rows) * (TileWidth / 2f);
+        float mapHeight = (_map.Columns + _map.Rows) * (TileHeight / 2f);
+        Vector2 viewport = GetViewportRect().Size;
+        float zoom = Mathf.Min(viewport.X / mapWidth, viewport.Y / mapHeight) * 0.9f;
+        _camera.Zoom = new Vector2(zoom, zoom);
     }
 
     /// <summary>
@@ -42,10 +60,11 @@ public partial class IsoMap : Node2D
 
         if (!store.Exists())
         {
-            GD.Print($"No save found — seeding new campaign at {dbPath}");
-            var seeded = CampaignMapState.CreateDemo();
-            store.Save(seeded);
-            return seeded;
+            GD.Print($"No save found — generating new campaign at {dbPath}");
+            var generated = MapGenerator.Generate(
+                seed: MapSeed, columns: 100, rows: 100, provinceCount: 160);
+            store.Save(generated);
+            return generated;
         }
 
         GD.Print($"Loading campaign from {dbPath}");
@@ -134,18 +153,25 @@ public partial class IsoMap : Node2D
                 DrawTile(col, row);
     }
 
+    private static readonly Color SeaColor = new("2a5a7a");
+
     private void DrawTile(int col, int row)
     {
         var cell = new Cell(col, row);
-        var province = _map.ProvinceAt(cell);
-        if (province is null)
-            return;
-
         Vector2 c = CellToScreen(col, row);
         Vector2 top = c + new Vector2(0, -TileHeight / 2f);
         Vector2 right = c + new Vector2(TileWidth / 2f, 0);
         Vector2 bottom = c + new Vector2(0, TileHeight / 2f);
         Vector2 left = c + new Vector2(-TileWidth / 2f, 0);
+
+        var province = _map.ProvinceAt(cell);
+
+        // Water: cells not in any province render as sea, no borders.
+        if (province is null)
+        {
+            DrawColoredPolygon(new[] { top, right, bottom, left }, SeaColor);
+            return;
+        }
 
         // Fill by owning faction; lighten the tile under the cursor.
         var owner = _map.OwnerOf(province);
