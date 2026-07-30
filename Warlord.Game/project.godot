@@ -1,0 +1,19 @@
+; Godot project configuration.
+; Warlord — campaign map (isometric) hello-world.
+
+config_version=5
+
+[application]
+
+config/name="Warlord"
+run/main_scene="res://scenes/Campaign/CampaignMap.tscn"
+config/features=PackedStringArray("4.4", "C#", "Forward Plus")
+
+[dotnet]
+
+project/assembly_name="Warlord.Game"
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720

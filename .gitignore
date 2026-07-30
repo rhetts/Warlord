@@ -1,0 +1,11 @@
+# Godot 4 .NET
+.godot/
+*.tmp
+
+# .NET
+bin/
+obj/
+
+# Godot export artifacts
+export_presets.cfg
+build/
