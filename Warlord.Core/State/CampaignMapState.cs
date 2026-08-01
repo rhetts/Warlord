@@ -15,17 +15,20 @@ public sealed class CampaignMapState
 
     private readonly Dictionary<Cell, Province> _cellToProvince;
     private readonly Dictionary<int, Faction> _factionsById;
+    private readonly IReadOnlyDictionary<Cell, Terrain> _terrain;
 
     public CampaignMapState(
         int columns,
         int rows,
         IReadOnlyList<Faction> factions,
-        IReadOnlyList<Province> provinces)
+        IReadOnlyList<Province> provinces,
+        IReadOnlyDictionary<Cell, Terrain>? terrain = null)
     {
         Columns = columns;
         Rows = rows;
         Factions = factions;
         Provinces = provinces;
+        _terrain = terrain ?? new Dictionary<Cell, Terrain>();
 
         _factionsById = factions.ToDictionary(f => f.Id);
         _cellToProvince = new Dictionary<Cell, Province>();
@@ -33,6 +36,10 @@ public sealed class CampaignMapState
             foreach (var cell in province.Cells)
                 _cellToProvince[cell] = province;
     }
+
+    /// <summary>Terrain at a cell; cells with no recorded terrain are Water.</summary>
+    public Terrain TerrainAt(Cell cell) =>
+        _terrain.GetValueOrDefault(cell, Terrain.Water);
 
     /// <summary>The province containing a cell, or null if the cell is off-map.</summary>
     public Province? ProvinceAt(Cell cell) =>

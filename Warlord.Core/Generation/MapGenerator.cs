@@ -25,9 +25,10 @@ public static class MapGenerator
     {
         factions ??= Clans.Default;
         var rng = new Random(seed);
-        var noise = new ValueNoise(seed);
+        var elevationNoise = new ValueNoise(seed);
+        var moistureNoise = new ValueNoise(seed ^ 0x5F3759DF); // decorrelated field
 
-        var landCells = BuildLandMask(noise, columns, rows);
+        var (landCells, elevation) = BuildLandMask(elevationNoise, columns, rows);
         if (landCells.Count == 0)
             throw new InvalidOperationException("Generation produced no land; adjust parameters.");
 
@@ -38,35 +39,78 @@ public static class MapGenerator
         var provinces = BuildProvinces(rng, cellsBySeed);
         AssignFactions(provinces, factions);
 
-        return new CampaignMapState(columns, rows, factions, provinces);
+        var terrain = ClassifyTerrain(landCells, elevation, moistureNoise, columns, rows);
+
+        return new CampaignMapState(columns, rows, factions, provinces, terrain);
     }
 
-    // 1. Fractal noise minus a radial falloff => an island that fills the middle
-    //    and fades to sea at the edges.
-    private static List<Cell> BuildLandMask(ValueNoise noise, int columns, int rows)
-    {
-        const float noiseScale = 0.11f;
-        const float seaLevel = 0.35f;
+    private const float NoiseScale = 0.11f;
+    private const float SeaLevel = 0.35f;
 
+    // 1. Fractal noise minus a radial falloff => an island that fills the middle
+    //    and fades to sea at the edges. Returns the land cells and the elevation
+    //    field (used later to classify terrain).
+    private static (List<Cell> land, float[,] elevation) BuildLandMask(
+        ValueNoise noise, int columns, int rows)
+    {
         float cx = (columns - 1) / 2f;
         float cy = (rows - 1) / 2f;
         float maxDist = MathF.Sqrt(cx * cx + cy * cy);
 
+        var elevation = new float[columns, rows];
         var land = new List<Cell>();
         for (int y = 0; y < rows; y++)
         {
             for (int x = 0; x < columns; x++)
             {
-                float n = noise.Fractal(x * noiseScale, y * noiseScale, octaves: 5);
+                float n = noise.Fractal(x * NoiseScale, y * NoiseScale, octaves: 5);
                 float d = MathF.Sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) / maxDist;
                 // No penalty near the center; edges get pushed under the sea.
-                float elevation = n - MathF.Max(0f, d - 0.50f) * 1.4f;
-                if (elevation > seaLevel)
+                float e = n - MathF.Max(0f, d - 0.50f) * 1.4f;
+                elevation[x, y] = e;
+                if (e > SeaLevel)
                     land.Add(new Cell(x, y));
             }
         }
-        return land;
+        return (land, elevation);
     }
+
+    // Whittaker-style classification: high land -> Mountains/Hills; low land is
+    // Coast if it touches the sea, else Forest/Plains by moisture.
+    private static Dictionary<Cell, Terrain> ClassifyTerrain(
+        List<Cell> land, float[,] elevation, ValueNoise moistureNoise, int columns, int rows)
+    {
+        var landSet = new HashSet<Cell>(land);
+        var terrain = new Dictionary<Cell, Terrain>(land.Count);
+
+        foreach (var cell in land)
+        {
+            // Height above sea level, normalized to roughly 0..1.
+            float height = (elevation[cell.Col, cell.Row] - SeaLevel) / (1f - SeaLevel);
+
+            Terrain t;
+            if (height > 0.42f)
+                t = Terrain.Mountains;
+            else if (height > 0.26f)
+                t = Terrain.Hills;
+            else if (TouchesSea(cell, landSet))
+                t = Terrain.Coast;
+            else
+            {
+                float moisture = moistureNoise.Fractal(
+                    cell.Col * NoiseScale, cell.Row * NoiseScale, octaves: 4);
+                t = moisture > 0.5f ? Terrain.Forest : Terrain.Plains;
+            }
+            terrain[cell] = t;
+        }
+        return terrain;
+    }
+
+    private static bool TouchesSea(Cell cell, HashSet<Cell> land) =>
+        !land.Contains(new Cell(cell.Col - 1, cell.Row)) ||
+        !land.Contains(new Cell(cell.Col + 1, cell.Row)) ||
+        !land.Contains(new Cell(cell.Col, cell.Row - 1)) ||
+        !land.Contains(new Cell(cell.Col, cell.Row + 1));
 
     // 2a. Poisson-ish seed points: random land cells with a minimum spacing.
     private static List<Cell> ScatterSeeds(Random rng, List<Cell> land, int count)

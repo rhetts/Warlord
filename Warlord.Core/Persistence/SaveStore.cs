@@ -16,7 +16,7 @@ public sealed class SaveStore
     /// old saves fail loudly (and can later be migrated) rather than silently
     /// loading garbage.
     /// </summary>
-    public const int SchemaVersion = 1;
+    public const int SchemaVersion = 2;
 
     private readonly string _path;
 
@@ -43,7 +43,7 @@ public sealed class SaveStore
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS factions (id INTEGER PRIMARY KEY, name TEXT NOT NULL, r INTEGER, g INTEGER, b INTEGER);
             CREATE TABLE IF NOT EXISTS provinces (id INTEGER PRIMARY KEY, name TEXT NOT NULL, owner_faction_id INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS province_cells (province_id INTEGER NOT NULL, col INTEGER NOT NULL, row INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS province_cells (province_id INTEGER NOT NULL, col INTEGER NOT NULL, row INTEGER NOT NULL, terrain INTEGER NOT NULL DEFAULT 0);
             DELETE FROM meta;
             DELETE FROM factions;
             DELETE FROM provinces;
@@ -67,8 +67,8 @@ public sealed class SaveStore
 
             foreach (var cell in p.Cells)
                 Exec(conn,
-                    "INSERT INTO province_cells (province_id, col, row) VALUES (:pid, :col, :row);",
-                    ("pid", p.Id), ("col", cell.Col), ("row", cell.Row));
+                    "INSERT INTO province_cells (province_id, col, row, terrain) VALUES (:pid, :col, :row, :terrain);",
+                    ("pid", p.Id), ("col", cell.Col), ("row", cell.Row), ("terrain", (int)map.TerrainAt(cell)));
         }
 
         tx.Commit();
@@ -97,18 +97,21 @@ public sealed class SaveStore
                     new RgbColor((byte)r.GetInt32(2), (byte)r.GetInt32(3), (byte)r.GetInt32(4))));
         }
 
-        // province id -> its cells
+        // province id -> its cells, plus a cell -> terrain map
         var cellsByProvince = new Dictionary<int, List<Cell>>();
+        var terrain = new Dictionary<Cell, Terrain>();
         using (var cmd = conn.CreateCommand())
         {
-            cmd.CommandText = "SELECT province_id, col, row FROM province_cells;";
+            cmd.CommandText = "SELECT province_id, col, row, terrain FROM province_cells;";
             using var r = cmd.ExecuteReader();
             while (r.Read())
             {
                 int pid = r.GetInt32(0);
+                var cell = new Cell(r.GetInt32(1), r.GetInt32(2));
                 if (!cellsByProvince.TryGetValue(pid, out var list))
                     cellsByProvince[pid] = list = new List<Cell>();
-                list.Add(new Cell(r.GetInt32(1), r.GetInt32(2)));
+                list.Add(cell);
+                terrain[cell] = (Terrain)r.GetInt32(3);
             }
         }
 
@@ -130,7 +133,7 @@ public sealed class SaveStore
             }
         }
 
-        return new CampaignMapState(columns, rows, factions, provinces);
+        return new CampaignMapState(columns, rows, factions, provinces, terrain);
     }
 
     private static void SetMeta(SqliteConnection conn, string key, string value) =>

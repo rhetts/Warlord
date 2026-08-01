@@ -9,3 +9,6 @@ obj/
 # Godot export artifacts
 export_presets.cfg
 build/
+
+# Local debug screenshots
+Artifacts/
