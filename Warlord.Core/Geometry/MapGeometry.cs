@@ -32,13 +32,62 @@ public static class MapGeometry
         BuildSmoothedOutlines(
             map.Columns, map.Rows,
             (c, r) => map.ProvinceAt(new Cell(c, r)) is not null,
-            smoothingIterations, roughness);
+            smoothingIterations, roughness, canonicalNormal: false);
+
+    /// <summary>
+    /// Groups Mountains cells into contiguous clusters (8-connected, so
+    /// diagonal neighbors count), so a whole mountain range can be rendered as
+    /// one connected shape instead of one disconnected blob per cell.
+    /// </summary>
+    public static List<List<Cell>> ExtractMountainClusters(CampaignMapState map)
+    {
+        var visited = new bool[map.Columns, map.Rows];
+        var clusters = new List<List<Cell>>();
+
+        for (int r = 0; r < map.Rows; r++)
+        {
+            for (int c = 0; c < map.Columns; c++)
+            {
+                if (visited[c, r] || map.TerrainAt(new Cell(c, r)) != Terrain.Mountains) continue;
+
+                var cluster = new List<Cell>();
+                var queue = new Queue<Cell>();
+                queue.Enqueue(new Cell(c, r));
+                visited[c, r] = true;
+
+                while (queue.Count > 0)
+                {
+                    var cell = queue.Dequeue();
+                    cluster.Add(cell);
+
+                    for (int dr = -1; dr <= 1; dr++)
+                    {
+                        for (int dc = -1; dc <= 1; dc++)
+                        {
+                            if (dc == 0 && dr == 0) continue;
+                            int nc = cell.Col + dc, nr = cell.Row + dr;
+                            if (nc < 0 || nr < 0 || nc >= map.Columns || nr >= map.Rows) continue;
+                            if (visited[nc, nr]) continue;
+                            if (map.TerrainAt(new Cell(nc, nr)) != Terrain.Mountains) continue;
+
+                            visited[nc, nr] = true;
+                            queue.Enqueue(new Cell(nc, nr));
+                        }
+                    }
+                }
+                clusters.Add(cluster);
+            }
+        }
+        return clusters;
+    }
 
     /// <summary>
     /// Smoothed outline loops for every province (each province vs. everything
     /// else), so province borders round the same way the coast does. Interior
-    /// borders shared by two provinces are traced from both — but Chaikin gives
-    /// identical points on straight shared runs, so they overlap cleanly.
+    /// borders shared by two provinces are traced from both, in opposite
+    /// directions — Chaikin alone gives identical points on those shared runs,
+    /// but the cosmetic roughness jitter needs <c>canonicalNormal</c> (below) or
+    /// the two traces perturb to opposite sides and the border draws doubled.
     /// </summary>
     public static List<List<Vector2>> ExtractProvinceOutlines(
         CampaignMapState map, int smoothingIterations = 3, float roughness = 0f)
@@ -50,7 +99,7 @@ public static class MapGeometry
             all.AddRange(BuildSmoothedOutlines(
                 map.Columns, map.Rows,
                 (c, r) => map.ProvinceAt(new Cell(c, r))?.Id == id,
-                smoothingIterations, roughness));
+                smoothingIterations, roughness, canonicalNormal: true));
         }
         return all;
     }
@@ -58,7 +107,8 @@ public static class MapGeometry
     // Trace the outline of an arbitrary cell region, smoothed and (optionally)
     // roughened — shared by coastline and province-border extraction.
     private static List<List<Vector2>> BuildSmoothedOutlines(
-        int columns, int rows, Func<int, int, bool> inRegion, int smoothingIterations, float roughness)
+        int columns, int rows, Func<int, int, bool> inRegion, int smoothingIterations, float roughness,
+        bool canonicalNormal)
     {
         bool IsLand(int c, int r) => inRegion(c, r);
 
@@ -94,7 +144,7 @@ public static class MapGeometry
             points = Chaikin(points, smoothingIterations);
             if (roughness > 0f)
             {
-                points = Perturb(points, noise, roughness, PerturbFrequency);
+                points = Perturb(points, noise, roughness, PerturbFrequency, canonicalNormal);
                 points = Chaikin(points, 1); // soften any spikes the jitter introduced
             }
             result.Add(points);
@@ -102,10 +152,24 @@ public static class MapGeometry
         return result;
     }
 
-    // Displace each vertex along the loop's local normal by fractal noise, for a
-    // cosmetic wavy coastline. Deterministic (noise is a function of position),
-    // so the coast is stable frame-to-frame.
-    private static List<Vector2> Perturb(List<Vector2> points, ValueNoise noise, float amplitude, float frequency)
+    // Displace each vertex along a local normal by fractal noise, for cosmetic
+    // wavy borders. Deterministic (noise is a function of position), so the
+    // border is stable frame-to-frame.
+    //
+    // canonicalNormal=false derives the normal from the loop's own travel
+    // direction (prev -> next), which gives a coherent single-direction wobble
+    // along one continuous boundary — used for the coastline.
+    //
+    // canonicalNormal=true instead derives it from the two neighboring points
+    // sorted into a fixed order, independent of which way the loop is being
+    // walked. A province border shared with a neighbor is traced once per
+    // province, in opposite directions; with the travel-direction normal the
+    // two traces perturb to opposite sides of the border and it renders as two
+    // separate lines with a gap between them. The canonical order makes both
+    // traces compute the identical displacement for the identical shared point,
+    // so the two lines coincide again.
+    private static List<Vector2> Perturb(
+        List<Vector2> points, ValueNoise noise, float amplitude, float frequency, bool canonicalNormal)
     {
         int n = points.Count;
         var result = new List<Vector2>(n);
@@ -113,7 +177,12 @@ public static class MapGeometry
         {
             Vector2 prev = points[(i - 1 + n) % n];
             Vector2 next = points[(i + 1) % n];
-            Vector2 tangent = next - prev;
+
+            Vector2 lo = prev, hi = next;
+            if (canonicalNormal && (hi.X < lo.X || (hi.X == lo.X && hi.Y < lo.Y)))
+                (lo, hi) = (hi, lo);
+            Vector2 tangent = hi - lo;
+
             float len = tangent.Length();
             Vector2 normal = len > 1e-4f ? new Vector2(tangent.Y, -tangent.X) / len : Vector2.Zero;
 
