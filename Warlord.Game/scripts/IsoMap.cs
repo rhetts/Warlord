@@ -37,6 +37,7 @@ public partial class IsoMap : Node2D
     private Vector2I _hoveredCell = new(-1, -1);
     private bool _dragging;
     private SubViewportContainer _characterViewport = null!;
+    private SettingsView _settingsView = null!;
 
     // Settlement style preview gallery (see PlaceSettlementPreviews) — world
     // -space bounds + label per marker, checked on mouse move so hovering one
@@ -46,6 +47,8 @@ public partial class IsoMap : Node2D
 
     public override async void _Ready()
     {
+        KeyBindings.Initialize();
+
         _camera = GetNode<Camera2D>("Camera2D");
         _info = GetNode<Label>("HUD/Info");
         _map = LoadOrSeedMap();
@@ -98,26 +101,46 @@ public partial class IsoMap : Node2D
 
         BuildModeMenu();
         BuildCharacterView();
+        BuildSettingsView();
 
         MaybeScreenshot();
     }
 
+    private enum GameMode { Map, Character, Settings }
+
     // A simple top menu: "Map" shows the existing 2D campaign map (unchanged
-    // below), "Character" shows a live 3D preview instead. The character
-    // viewport is a screen-covering overlay under the same HUD CanvasLayer,
-    // so it draws on top of the map without needing to touch any of the
-    // map's own nodes — showing/hiding it is the entire mode switch.
+    // below), "Character" shows a live 3D preview instead, "Settings" shows
+    // the key-binding panel. Both the character viewport and the settings
+    // panel are screen-covering overlays under the same HUD CanvasLayer, so
+    // they draw on top of the map without needing to touch any of the map's
+    // own nodes — showing/hiding the right one is the entire mode switch.
     private void BuildModeMenu()
     {
         var hud = GetNode("HUD");
 
         var mapButton = new Button { Text = "Map", Position = new Vector2(500, 8), Size = new Vector2(90, 32) };
-        mapButton.Pressed += () => _characterViewport.Visible = false;
+        mapButton.Pressed += () => ShowMode(GameMode.Map);
         hud.AddChild(mapButton);
 
         var characterButton = new Button { Text = "Character", Position = new Vector2(596, 8), Size = new Vector2(90, 32) };
-        characterButton.Pressed += () => _characterViewport.Visible = true;
+        characterButton.Pressed += () => ShowMode(GameMode.Character);
         hud.AddChild(characterButton);
+
+        var settingsButton = new Button { Text = "Settings", Position = new Vector2(692, 8), Size = new Vector2(90, 32) };
+        settingsButton.Pressed += () => ShowMode(GameMode.Settings);
+        hud.AddChild(settingsButton);
+    }
+
+    private void ShowMode(GameMode mode)
+    {
+        _characterViewport.Visible = mode == GameMode.Character;
+        _settingsView.Visible = mode == GameMode.Settings;
+    }
+
+    private void BuildSettingsView()
+    {
+        _settingsView = new SettingsView { Visible = false };
+        GetNode("HUD").AddChild(_settingsView);
     }
 
     // A live (not baked) 3D scene showing one warrior model — CC0 "Knight
@@ -155,25 +178,33 @@ public partial class IsoMap : Node2D
             LightEnergy = 1.2f,
         });
 
-        // Flat ground so walking forward/back reads as movement rather than
-        // the character just drifting through a void.
+        // Flat ground, tiled with the same grass texture the 2D map uses for
+        // Plains, so walking forward/back reads as movement across a real
+        // surface rather than the character drifting through a void.
         viewport.AddChild(new MeshInstance3D
         {
             Mesh = new PlaneMesh { Size = new Vector2(200f, 200f) },
-            MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.22f, 0.28f, 0.22f) },
+            MaterialOverride = new StandardMaterial3D
+            {
+                AlbedoTexture = GD.Load<Texture2D>("res://textures/terrain/plains.jpg"),
+                Uv1Scale = new Vector3(40f, 40f, 1f),
+            },
         });
 
         var rotator = new CharacterView();
         viewport.AddChild(rotator);
 
-        // Camera is a child of the outer CharacterView node so it still
-        // follows forward/back walking, but CharacterView only ever
-        // translates — it never rotates itself. Turning instead rotates just
-        // the ModelPivot (see CharacterView), so the camera keeps a fixed
-        // facing while the character model spins in place in front of it.
-        var camera = new Camera3D { Position = new Vector3(0f, 1.6f, 6f) };
-        rotator.AddChild(camera);
-        camera.LookAt(new Vector3(0f, 1.1f, 0f), Vector3.Up);
+        // Camera is a child of CameraPitchPivot, itself a rigid child of
+        // CameraRig (see CharacterView) — a separate pivot chain from
+        // ModelPivot, so orbiting the camera (arrow keys) never turns the
+        // model. Orbiting either pivot carries the camera around the
+        // character while it keeps looking at CameraPitchPivot's origin,
+        // since a rigid rotation of a parent preserves a child's relative
+        // facing. No per-frame LookAt needed: at identity rotation, a node
+        // at local +Z already faces -Z (Godot's forward), i.e. back toward
+        // the pivot.
+        var camera = new Camera3D { Position = new Vector3(0f, 0f, 6f) };
+        rotator.CameraPitchPivot.AddChild(camera);
 
         var knightScene = GD.Load<PackedScene>("res://models/characters/KnightCharacter.fbx");
         var knight = knightScene.Instantiate<Node3D>();
@@ -714,12 +745,13 @@ public partial class IsoMap : Node2D
 
     public override void _Process(double delta)
     {
-        // Arrow keys drive the character in Character mode instead — don't
-        // also pan the (hidden) 2D map camera, or it silently drifts while
-        // you walk around and lands somewhere odd when you switch back.
-        // Null-checked: _Process runs every frame independent of _Ready's
-        // async bake chain, so it can fire before BuildCharacterView has run.
-        if (_characterViewport?.Visible == true) return;
+        // Arrow keys/WASD drive the character or the settings rebind capture
+        // instead — don't also pan the (hidden) 2D map camera, or it
+        // silently drifts while you're in another mode and lands somewhere
+        // odd when you switch back. Null-checked: _Process runs every frame
+        // independent of _Ready's async bake chain, so it can fire before
+        // BuildCharacterView/BuildSettingsView have run.
+        if (_characterViewport?.Visible == true || _settingsView?.Visible == true) return;
 
         var dir = Input.GetVector("ui_left", "ui_right", "ui_up", "ui_down");
         if (dir != Vector2.Zero)
